@@ -1,0 +1,572 @@
+openapi: 3.0.3
+info:
+  title: Secure Transfer API
+  version: 1.0.0
+  description: |
+    Transfers between accounts held within the same financial institution.
+
+    **Authentication:** obtain a JWT from `POST /api/v1/auth/token`, then send
+    `Authorization: Bearer <token>` on every other request.
+
+    **Access:** customers are gated by role (`CUSTOMER`); staff are gated by permission.
+
+    **Duplicate protection:** `transactionRef` (client-generated UUID) is unique.
+    Same ref + same body returns the original result (`200`, `Idempotent-Replayed: true`);
+    same ref + different body returns `409`.
+
+    **Single currency:** amounts are strings with at most 2 decimal places.
+
+servers:
+  - url: http://localhost:8090
+    description: Docker Compose
+  - url: http://localhost:8080
+    description: Local (mvn spring-boot:run)
+
+tags:
+  - name: Auth
+  - name: Transfers
+  - name: Operations
+  - name: Accounts
+
+paths:
+  /api/v1/auth/token:
+    post:
+      tags: [Auth]
+      summary: Exchange credentials for an access token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRequest'
+            example:
+              username: jane.doe
+              password: Password@123
+      responses:
+        '200':
+          description: Token issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Invalid credentials (same response for unknown user and wrong password)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                title: Invalid credentials
+                status: 401
+                detail: Username or password is incorrect.
+                instance: /api/v1/auth/token
+                errorCode: INVALID_CREDENTIALS
+                traceId: ec76cc3b3f034045
+                timestamp: '2026-11-13T08:14:06.113Z'
+
+  /api/v1/transfers:
+    post:
+      tags: [Transfers]
+      summary: Customer transfer
+      description: |
+        Requires role `CUSTOMER`. The source account is the caller's own account,
+        resolved from the token. Type is always `NORMAL_TRANSFER`.
+      parameters:
+        - name: X-Channel
+          in: header
+          required: false
+          description: Originating channel, recorded in metadata. Unknown values default to API.
+          schema:
+            type: string
+            enum: [MOBILE, WEB, USSD, API]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomerTransferRequest'
+            example:
+              transactionRef: 8f14e45f-ceea-4e7a-9a6b-2c3d4e5f6a7b
+              destinationAccountNumber: '1000000002'
+              amount: '500.00'
+              narration: Rent
+      responses:
+        '201':
+          description: Transfer posted
+          headers:
+            Location:
+              schema:
+                type: string
+              example: /api/v1/transfers/8f14e45f-ceea-4e7a-9a6b-2c3d4e5f6a7b
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransferResponse'
+              example:
+                transactionRef: 8f14e45f-ceea-4e7a-9a6b-2c3d4e5f6a7b
+                status: SUCCESS
+                type: NORMAL_TRANSFER
+                direction: DEBIT
+                sourceAccountNumber: '1000000001'
+                destinationAccountNumber: '1000000002'
+                destinationAccountName: John S****
+                amount: '500.00'
+                narration: Rent
+                createdAt: '2026-11-13T08:14:06.290Z'
+        '200':
+          $ref: '#/components/responses/Replayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+        '409':
+          $ref: '#/components/responses/DuplicateRef'
+        '422':
+          $ref: '#/components/responses/TransferRejected'
+        '503':
+          $ref: '#/components/responses/ServiceBusy'
+
+  /api/v1/transfers/{transactionRef}:
+    get:
+      tags: [Transfers]
+      summary: Get a transfer
+      description: |
+        Role `CUSTOMER` (only transfers involving their own account; otherwise 404)
+        or permission `TRANSFER_READ` (any transfer, full staff view).
+      parameters:
+        - name: transactionRef
+          in: path
+          required: true
+          schema:
+            type: string
+          example: 8f14e45f-ceea-4e7a-9a6b-2c3d4e5f6a7b
+      responses:
+        '200':
+          description: Transfer found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransferResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Not found, or not a party to the transfer
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                title: Transfer not found
+                status: 404
+                detail: The requested transfer was not found.
+                instance: /api/v1/transfers/e23b1b6c-cb23-4620-9d51-0051b6b30849
+                errorCode: TRANSFER_NOT_FOUND
+                traceId: 10a8aa9a206c4fef
+                timestamp: '2026-11-13T08:14:07.612Z'
+
+  /api/v1/operations/transfers:
+    post:
+      tags: [Operations]
+      summary: Staff transfer between any two accounts
+      description: |
+        Permission depends on `type`:
+        `RECONCILIATION` requires `TRANSFER_RECONCILE`;
+        `AGENT_TRANSFER` requires `TRANSFER_AGENT`;
+        `NORMAL_TRANSFER` is not allowed here (400).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OperationsTransferRequest'
+            example:
+              transactionRef: 3b1d7c2a-9e4f-4a8b-b6c5-1d2e3f4a5b6c
+              type: RECONCILIATION
+              sourceAccountNumber: '9000000001'
+              destinationAccountNumber: '1000000002'
+              amount: '1000.00'
+              reason: 'Recon RC-55: misposted branch deposit'
+              metadata:
+                reconItemId: RC-55
+      responses:
+        '201':
+          description: Transfer posted
+          headers:
+            Location:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransferResponse'
+              example:
+                transactionRef: 3b1d7c2a-9e4f-4a8b-b6c5-1d2e3f4a5b6c
+                status: SUCCESS
+                type: RECONCILIATION
+                sourceAccountNumber: '9000000001'
+                destinationAccountNumber: '1000000002'
+                destinationAccountName: John Smith
+                amount: '1000.00'
+                reason: 'Recon RC-55: misposted branch deposit'
+                initiatedBy: ops.mary
+                metadata:
+                  reconItemId: RC-55
+                createdAt: '2026-11-13T08:14:07.345Z'
+        '200':
+          $ref: '#/components/responses/Replayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+        '409':
+          $ref: '#/components/responses/DuplicateRef'
+        '422':
+          $ref: '#/components/responses/TransferRejected'
+        '503':
+          $ref: '#/components/responses/ServiceBusy'
+
+  /api/v1/accounts/{accountNumber}:
+    get:
+      tags: [Accounts]
+      summary: Get an account
+      description: |
+        Role `CUSTOMER` (own account only; otherwise 404)
+        or permission `ACCOUNT_READ` (any account).
+      parameters:
+        - name: accountNumber
+          in: path
+          required: true
+          schema:
+            type: string
+          example: '1000000001'
+      responses:
+        '200':
+          description: Account found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AccountNotFound'
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    TokenRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          maxLength: 64
+        password:
+          type: string
+          format: password
+          maxLength: 128
+
+    TokenResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          example: Bearer
+        expires_in:
+          type: integer
+          description: Seconds until expiry
+          example: 900
+
+    CustomerTransferRequest:
+      type: object
+      required: [transactionRef, destinationAccountNumber, amount]
+      properties:
+        transactionRef:
+          type: string
+          format: uuid
+          description: Client-generated; unique per transfer
+        destinationAccountNumber:
+          type: string
+          pattern: '^\d{10}$'
+        amount:
+          type: string
+          pattern: '^\d{1,17}(\.\d{1,2})?$'
+          description: Greater than 0, at most 2 decimal places
+          example: '500.00'
+        narration:
+          type: string
+          maxLength: 140
+
+    OperationsTransferRequest:
+      type: object
+      required: [transactionRef, type, sourceAccountNumber, destinationAccountNumber, amount, reason]
+      properties:
+        transactionRef:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [RECONCILIATION, AGENT_TRANSFER]
+        sourceAccountNumber:
+          type: string
+          pattern: '^\d{10}$'
+        destinationAccountNumber:
+          type: string
+          pattern: '^\d{10}$'
+        amount:
+          type: string
+          pattern: '^\d{1,17}(\.\d{1,2})?$'
+          example: '1000.00'
+        reason:
+          type: string
+          minLength: 10
+          maxLength: 255
+        metadata:
+          type: object
+          description: |
+            Optional flat object (max 20 entries, 4 KB). Values must be strings (max 255),
+            numbers or booleans. Keys matching core fields (amount, type, ...) are rejected.
+          additionalProperties:
+            oneOf:
+              - type: string
+              - type: number
+              - type: boolean
+
+    TransferResponse:
+      type: object
+      description: |
+        Customer view omits reason, initiatedBy and metadata, and includes direction.
+        Staff view includes all fields except direction.
+      properties:
+        transactionRef:
+          type: string
+        status:
+          type: string
+          enum: [SUCCESS, FAILED]
+        type:
+          type: string
+          enum: [NORMAL_TRANSFER, RECONCILIATION, AGENT_TRANSFER]
+        direction:
+          type: string
+          enum: [DEBIT, CREDIT]
+          description: Customer view only, relative to the caller's account
+        sourceAccountNumber:
+          type: string
+        destinationAccountNumber:
+          type: string
+        destinationAccountName:
+          type: string
+          description: Masked in the customer view (e.g. "John S****")
+        amount:
+          type: string
+          example: '500.00'
+        narration:
+          type: string
+        reason:
+          type: string
+        failureReason:
+          type: string
+          enum: [ACCOUNT_NOT_FOUND, ACCOUNT_INACTIVE, INSUFFICIENT_FUNDS]
+        initiatedBy:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+
+    AccountResponse:
+      type: object
+      properties:
+        accountNumber:
+          type: string
+          example: '1000000001'
+        accountName:
+          type: string
+          example: Jane Doe
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE, FROZEN, CLOSED]
+        balance:
+          type: string
+          example: '49500.00'
+        asOf:
+          type: string
+          format: date-time
+
+    ApiError:
+      type: object
+      description: Uniform error body (RFC 9457 fields, without "type")
+      properties:
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+        errorCode:
+          type: string
+          description: Stable machine-readable code
+        transactionRef:
+          type: string
+          description: Present when a transfer was recorded as FAILED
+        traceId:
+          type: string
+          description: Also returned in the X-Trace-Id header and written to logs
+        timestamp:
+          type: string
+          format: date-time
+        errors:
+          type: array
+          description: Field errors (VALIDATION_FAILED only)
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+
+  responses:
+    Replayed:
+      description: Same transactionRef and same body already processed; original result returned
+      headers:
+        Idempotent-Replayed:
+          schema:
+            type: string
+            example: 'true'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/TransferResponse'
+
+    BadRequest:
+      description: |
+        Invalid request (not recorded). errorCode is one of VALIDATION_FAILED, MALFORMED_REQUEST,
+        SAME_ACCOUNT_TRANSFER, INVALID_AMOUNT, TRANSFER_TYPE_NOT_ALLOWED, INVALID_METADATA.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            title: Validation failed
+            status: 400
+            detail: Request contains invalid fields.
+            instance: /api/v1/transfers
+            errorCode: VALIDATION_FAILED
+            traceId: 23b67f9f81a74a60
+            timestamp: '2026-11-13T08:14:07.108Z'
+            errors:
+              - field: amount
+                message: must have at most 2 decimal places
+
+    Unauthorized:
+      description: Missing, invalid or expired token
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            title: Unauthorized
+            status: 401
+            detail: A valid bearer token is required.
+            instance: /api/v1/transfers
+            errorCode: UNAUTHORIZED
+            traceId: fb13d836bb514a1b
+            timestamp: '2026-11-13T08:14:06.136Z'
+
+    Forbidden:
+      description: Missing role or permission
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            title: Forbidden
+            status: 403
+            detail: You do not have permission to perform this action.
+            instance: /api/v1/operations/transfers
+            errorCode: FORBIDDEN
+            traceId: 62e42d736fe44aa9
+            timestamp: '2026-11-13T08:14:07.126Z'
+
+    AccountNotFound:
+      description: Account not found (or, for customers, not their own). Transfers are recorded as FAILED.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            title: Account not found
+            status: 404
+            detail: The requested account was not found.
+            instance: /api/v1/accounts/1000000002
+            errorCode: ACCOUNT_NOT_FOUND
+            traceId: 8e0c97479a3441eb
+            timestamp: '2026-11-13T08:14:07.670Z'
+
+    DuplicateRef:
+      description: transactionRef already used with a different request body
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            title: Duplicate transaction reference
+            status: 409
+            detail: This transactionRef has already been used for a different request.
+            instance: /api/v1/transfers
+            errorCode: DUPLICATE_TRANSACTION_REF
+            traceId: b49d76a029d0476d
+            timestamp: '2026-11-13T08:14:06.440Z'
+
+    TransferRejected:
+      description: Business rejection, recorded as FAILED. errorCode is INSUFFICIENT_FUNDS or ACCOUNT_INACTIVE.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            title: Insufficient funds
+            status: 422
+            detail: Source account balance is insufficient for this transfer.
+            instance: /api/v1/transfers
+            errorCode: INSUFFICIENT_FUNDS
+            transactionRef: 736aa6d4-52c2-4c56-a724-abe01b43fd82
+            traceId: fd61ed24e6c542ca
+            timestamp: '2026-11-13T08:14:06.666Z'
+
+    ServiceBusy:
+      description: Account lock could not be acquired; retry with the same transactionRef
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ApiError'

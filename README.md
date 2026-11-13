@@ -73,6 +73,8 @@ All demo users have the password **`Password@123`**.
 
 ## 3. API
 
+Full specification: [`docs/openapi.yaml`](docs/openapi.yaml) (OpenAPI 3.0; open it in https://editor.swagger.io).
+
 | Method & route | Access | Purpose |
 |---|---|---|
 | `POST /api/v1/auth/token` | public | Exchange credentials for a JWT |
