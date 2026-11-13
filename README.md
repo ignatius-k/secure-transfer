@@ -10,34 +10,40 @@ A Spring Boot REST API for transferring money between accounts held within the s
 
 **Prerequisites:** JDK 17+, Maven 3.8+, Docker.
 
+### Environment
+
+```bash
+cp .env.example .env   # then adjust values if needed
+```
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DB_NAME` | `secure_transfer` | Database name |
+| `DB_USERNAME` / `DB_PASSWORD` | `secure_transfer` | Database credentials |
+| `DB_PORT` | `5433` | Host port for PostgreSQL |
+| `APP_PORT` | `8090` | Host port for the API |
+| `DEMO_DATA_ENABLED` | `true` | Seed demo users and accounts on first start |
+
 ### Option A: Docker Compose (app + PostgreSQL)
 
 ```bash
-mvn test                      # run the unit tests
-mvn -DskipTests package       # build the jar (the image packages it)
+mvn -DskipTests package       # build the jar
 docker compose up -d --build  # start PostgreSQL and the API
 ```
-- The API is at **http://localhost:8090** (change it with `APP_PORT=9000 docker compose up -d`).
-- PostgreSQL is on `localhost:5433`.
-- Flyway migrates the schema on startup.
-- Logs: `docker compose logs -f app`. Stop: `docker compose down`. Stop and wipe data: `docker compose down -v`.
-
-The jar is built on the host so the image build reuses the local Maven cache instead of downloading every dependency inside Docker.
+API: **http://localhost:8090**. Stop: `docker compose down` (add `-v` to wipe data).
 
 ### Option B: Run locally with Maven
 
 ```bash
-docker compose up -d postgres   # PostgreSQL only (host port 5433)
+docker compose up -d postgres   # PostgreSQL only
 mvn spring-boot:run             # API on http://localhost:8080
 ```
 
-| Env var | Default |
-|---|---|
-| `DB_URL` | `jdbc:postgresql://localhost:5433/secure_transfer` |
-| `DB_USERNAME` / `DB_PASSWORD` | `secure_transfer` / `secure_transfer` |
-| `DEMO_DATA_ENABLED` | `true` (disable outside local/dev) |
-| `SERVER_PORT` | `8080` |
-| `APP_PORT` (compose only) | `8090`, the host port mapped to the container |
+### Tests
+
+```bash
+mvn test
+```
 
 ### Demo data (seeded on first start)
 
