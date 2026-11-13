@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: secure-transfer-db
+    environment:
+      POSTGRES_DB: secure_transfer
+      POSTGRES_USER: secure_transfer
+      POSTGRES_PASSWORD: secure_transfer
+    ports:
+      - "5433:5432"
+    volumes:
+      - secure-transfer-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U secure_transfer -d secure_transfer"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    image: secure-transfer:1.0.0
+    container_name: secure-transfer-app
+    depends_on:
+      postgres:
+        condition: service_healthy   # wait until Postgres accepts connections
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/secure_transfer
+      DB_USERNAME: secure_transfer
+      DB_PASSWORD: secure_transfer
+      DEMO_DATA_ENABLED: "true"
+    ports:
+      - "${APP_PORT:-8090}:8080"     # host port configurable; container always listens on 8080
+    restart: unless-stopped
+
+volumes:
+  secure-transfer-data:
